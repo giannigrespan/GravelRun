@@ -299,7 +299,7 @@
         <div class="leaderboard-box">
             <div class="leaderboard-title">
                 <span>Classifica di Oggi</span>
-                <span id="lb-status" style="font-size:10px; color:#64748b;">Cloud Mock API</span>
+                <span id="lb-status" style="font-size:10px; color:#64748b;">Connessione...</span>
             </div>
             <ul class="leaderboard-list" id="leaderboard-list">
                 <li class="leaderboard-item">Caricamento tempi...</li>
@@ -345,59 +345,50 @@ const today = new Date();
 document.getElementById('daily-date').innerText = `Tappa del ${today.getDate()}/${today.getMonth()+1}/${today.getFullYear()}`;
 
 // ==========================================
-// MOCK ONLINE LEADERBOARD SERVICE (Persistent via localStorage + Network simulation)
+// ONLINE LEADERBOARD SERVICE (API Vercel + MongoDB, fallback locale)
 // ==========================================
 const LeaderboardService = {
     async getDailyScores() {
-        // Simula latenza di rete REST API (es. Firebase / Supabase)
-        await new Promise(r => setTimeout(r, 200));
-
-        const dateKey = getDailyDateKey();
-        const storageKey = `daily_gravel_lb_${dateKey}`;
-        let scores = JSON.parse(localStorage.getItem(storageKey));
-
-        if (!scores) {
-            // Dati iniziali simulati per la classifica della giornata
-            scores = [
-                { name: "Marco_GRVL", dist: 4.82, time: "1:42" },
-                { name: "Sara_Watts", dist: 3.95, time: "1:25" },
-                { name: "PelotonPro", dist: 3.10, time: "1:05" },
-                { name: "MudLover", dist: 2.45, time: "0:52" },
-                { name: "VeloGravel", dist: 1.80, time: "0:40" }
-            ];
-            localStorage.setItem(storageKey, JSON.stringify(scores));
-        }
-        return scores.sort((a, b) => b.dist - a.dist);
+        const res = await fetch('/api/scores');
+        if (!res.ok) throw new Error('API ' + res.status);
+        return (await res.json()).scores;
     },
 
     async submitScore(playerName, distanceKm) {
         if (!playerName || distanceKm <= 0) return;
-        const scores = await this.getDailyScores();
-
-        // Calcola tempo simulato in base ai dati
-        const mins = Math.floor(distanceKm * 0.4);
-        const secs = Math.floor((distanceKm * 24) % 60);
-        const timeStr = `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-
-        scores.push({
-            name: playerName,
-            dist: parseFloat(distanceKm.toFixed(2)),
-            time: timeStr
+        const res = await fetch('/api/scores', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: playerName, dist: distanceKm })
         });
-
-        // Ordina e mantieni i migliori 10
-        const sorted = scores.sort((a, b) => b.dist - a.dist).slice(0, 10);
-        const dateKey = getDailyDateKey();
-        localStorage.setItem(`daily_gravel_lb_${dateKey}`, JSON.stringify(sorted));
-        return sorted;
+        if (!res.ok) throw new Error('API ' + res.status);
+        return (await res.json()).scores;
     }
 };
 
+function setLeaderboardStatus(text, ok) {
+    const el = document.getElementById('lb-status');
+    el.innerText = text;
+    el.style.color = ok ? '#22c55e' : '#f59e0b';
+}
+
 async function updateLeaderboardUI(lastSubmittedPlayer = null) {
     const listEl = document.getElementById('leaderboard-list');
-    const scores = await LeaderboardService.getDailyScores();
+    let scores;
+    try {
+        scores = await LeaderboardService.getDailyScores();
+        setLeaderboardStatus('Online', true);
+    } catch (e) {
+        setLeaderboardStatus('Offline', false);
+        listEl.innerHTML = '<li class="leaderboard-item">Classifica non disponibile</li>';
+        return;
+    }
 
     listEl.innerHTML = '';
+    if (!scores.length) {
+        listEl.innerHTML = '<li class="leaderboard-item">Nessun tempo oggi: sii il primo!</li>';
+        return;
+    }
     scores.forEach((s, index) => {
         const li = document.createElement('li');
         const isCurrent = lastSubmittedPlayer && s.name === lastSubmittedPlayer;
@@ -408,11 +399,16 @@ async function updateLeaderboardUI(lastSubmittedPlayer = null) {
         else if (index === 1) rankClass = 'top-2';
         else if (index === 2) rankClass = 'top-3';
 
-        li.innerHTML = `
-            <span class="rank ${rankClass}">#${index + 1}</span>
-            <span class="player-name">${s.name}</span>
-            <span class="score-val">${s.dist.toFixed(2)} km</span>
-        `;
+        const rank = document.createElement('span');
+        rank.className = `rank ${rankClass}`;
+        rank.textContent = `#${index + 1}`;
+        const name = document.createElement('span');
+        name.className = 'player-name';
+        name.textContent = s.name;
+        const val = document.createElement('span');
+        val.className = 'score-val';
+        val.textContent = `${s.dist.toFixed(2)} km`;
+        li.append(rank, name, val);
         listEl.appendChild(li);
     });
 }
@@ -490,7 +486,11 @@ async function gameOver() {
     const nickInput = document.getElementById('nickname').value.trim() || "Rider_1";
 
     // Invio punteggio online
-    await LeaderboardService.submitScore(nickInput, finalDistKm);
+    try {
+        await LeaderboardService.submitScore(nickInput, finalDistKm);
+    } catch (e) {
+        console.error(e);
+    }
 
     const overlay = document.getElementById('overlay');
     document.getElementById('overlay-title').innerText = 'Caduto!';
