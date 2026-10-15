@@ -369,12 +369,6 @@ function getDailyDateKey() {
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
-let seed = getDailySeed();
-function random() {
-    let x = Math.sin(seed++) * 10000;
-    return x - Math.floor(x);
-}
-
 const today = new Date();
 document.getElementById('daily-date').innerText = `Tappa del ${today.getDate()}/${today.getMonth()+1}/${today.getFullYear()}`;
 
@@ -531,8 +525,6 @@ let targetPlayerX = 0;
 let roadOffset = 0;
 
 const player = { x: 0, y: 0, width: 24, height: 48 };
-let obstacles = [];
-let banners = [];
 let particles = [];
 
 // Controlli Input
@@ -559,14 +551,13 @@ touchRight.addEventListener('touchend', (e) => { e.preventDefault(); keys.right 
 document.getElementById('start-btn').addEventListener('click', startGame);
 
 function startGame() {
-    seed = getDailySeed();
+    initWorld();
     gameState = 'PLAYING';
     distance = 0;
     speed = 18;
+    player.y = canvas.height - 120;
     playerX = canvas.width / 2;
     targetPlayerX = playerX;
-    obstacles = [];
-    banners = [];
     particles = [];
     document.getElementById('overlay').style.display = 'none';
 }
@@ -597,97 +588,178 @@ async function gameOver() {
     document.getElementById('active-sponsor').style.display = 'none';
 }
 
-function spawnWorldElements() {
-    if (gameState !== 'PLAYING') return;
+// ==========================================
+// MONDO: percorso sinuoso deterministico (stesso per tutti nella tappa del giorno)
+// ==========================================
+const CHUNK = 400;          // lunghezza di un blocco di mondo (px)
+let scroll = 0;             // posizione lungo il percorso
+let worldChunks = new Map();
+let roadPhase = [0, 0, 0];
+let shake = 0;
 
-    if (Math.random() < 0.03) {
-        const roadWidth = canvas.width * 0.6;
-        const minX = (canvas.width - roadWidth) / 2 + 20;
-        const maxX = (canvas.width + roadWidth) / 2 - 20;
-        obstacles.push({
-            x: minX + random() * (maxX - minX),
-            y: -50,
-            radius: 12 + random() * 10,
-            type: random() > 0.3 ? 'hole' : 'rock'
+function mulberry32(a) {
+    return function () {
+        a |= 0; a = a + 0x6D2B79F5 | 0;
+        let t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+}
+
+function hash1(n) {
+    const x = Math.sin(n * 12.9898) * 43758.5453;
+    return x - Math.floor(x);
+}
+
+function initWorld() {
+    const ds = getDailySeed();
+    const r = mulberry32(ds);
+    roadPhase = [r() * Math.PI * 2, r() * Math.PI * 2, r() * Math.PI * 2];
+    worldChunks = new Map();
+    scroll = 0;
+    shake = 0;
+}
+
+// Curve più ampie man mano che si avanza (tratto iniziale rettilineo)
+function curveRamp(sw) { return Math.min(1, Math.max(0, sw - 600) / 3000); }
+
+function roadCenter(sw) {
+    const amp = canvas.width * 0.2 * curveRamp(sw);
+    return canvas.width / 2
+        + amp * (0.65 * Math.sin(sw / 520 + roadPhase[0]) + 0.35 * Math.sin(sw / 230 + roadPhase[1]));
+}
+
+function roadHalfWidth(sw) {
+    // La strada si restringe leggermente e varia con il percorso
+    const narrow = 1 - 0.25 * Math.min(1, sw / 60000);
+    return canvas.width * 0.27 * narrow * (1 + 0.08 * Math.sin(sw / 900 + roadPhase[2]));
+}
+
+function getChunk(i) {
+    if (worldChunks.has(i)) return worldChunks.get(i);
+    const r = mulberry32(getDailySeed() * 1009 + i * 7919);
+    const chunk = { obstacles: [], banners: [], scenery: [] };
+    const start = i * CHUNK;
+    const difficulty = Math.min(1, i / 60);
+
+    const nObs = Math.floor(1 + r() * 2 + difficulty * 3);
+    for (let k = 0; k < nObs; k++) {
+        const roll = r();
+        chunk.obstacles.push({
+            s: start + 120 + r() * (CHUNK - 120),
+            off: (r() * 2 - 1) * 0.85,
+            radius: 11 + r() * 10,
+            type: roll < 0.5 ? 'hole' : roll < 0.75 ? 'rock' : 'puddle'
         });
     }
-
-    if (Math.random() < 0.008) {
-        const sponsor = SPONSORS[Math.floor(random() * SPONSORS.length)];
-        const side = random() > 0.5 ? 'left' : 'right';
-        const roadWidth = canvas.width * 0.6;
-        const x = side === 'left'
-            ? (canvas.width - roadWidth) / 2 - 40
-            : (canvas.width + roadWidth) / 2 + 10;
-
-        banners.push({ x, y: -80, width: 30, height: 60, sponsor, side });
+    if (r() < 0.22 && i > 2) {
+        chunk.banners.push({
+            s: start + r() * CHUNK,
+            side: r() < 0.5 ? -1 : 1,
+            sponsor: SPONSORS[Math.floor(r() * SPONSORS.length)]
+        });
     }
+    for (let k = 0; k < 7; k++) {
+        chunk.scenery.push({
+            s: start + r() * CHUNK,
+            side: r() < 0.5 ? -1 : 1,
+            dist: 18 + r() * 140,
+            size: 8 + r() * 14,
+            kind: r() < 0.6 ? 'tree' : 'bush'
+        });
+    }
+    worldChunks.set(i, chunk);
+    // libera i blocchi ormai dietro di noi
+    for (const key of worldChunks.keys()) if (key < i - 8) worldChunks.delete(key);
+    return chunk;
+}
+
+function visibleChunks() {
+    const first = Math.max(0, Math.floor((scroll - 150) / CHUNK));
+    const last = Math.floor((scroll + canvas.height + 150) / CHUNK);
+    const list = [];
+    for (let i = first; i <= last; i++) list.push(getChunk(i));
+    return list;
+}
+
+// posizione sullo schermo di un punto del mondo
+function worldToScreenY(sw) { return player.y - (sw - scroll); }
+
+function obstacleScreen(o) {
+    const sw = o.s;
+    return { x: roadCenter(sw) + o.off * roadHalfWidth(sw), y: worldToScreenY(sw) };
+}
+
+function isOffRoad() {
+    return Math.abs(player.x - roadCenter(scroll)) > roadHalfWidth(scroll) - 4;
 }
 
 function update() {
     if (gameState !== 'PLAYING') return;
 
-    speed = Math.min(MAX_SPEED, speed + 0.005);
+    player.y = canvas.height - 120;
+    const offRoad = isOffRoad();
+
+    // fuori strada si rallenta e si trema; sulla strada si accelera
+    if (offRoad) {
+        speed = Math.max(9, speed - 0.25);
+        shake = 2.5;
+    } else {
+        speed = Math.min(MAX_SPEED, speed + 0.02);
+        shake = Math.max(0, shake - 0.3);
+    }
+
     distance += speed * 0.1;
+    scroll += speed * 0.4;
     roadOffset += speed * 0.8;
 
     const moveSpeed = 6;
     if (keys.left) targetPlayerX -= moveSpeed;
     if (keys.right) targetPlayerX += moveSpeed;
-
-    const roadWidth = canvas.width * 0.65;
-    const minX = (canvas.width - roadWidth) / 2 + player.width;
-    const maxX = (canvas.width + roadWidth) / 2 - player.width;
-    targetPlayerX = Math.max(minX, Math.min(maxX, targetPlayerX));
+    targetPlayerX = Math.max(24, Math.min(canvas.width - 24, targetPlayerX));
 
     playerX += (targetPlayerX - playerX) * 0.2;
     player.x = playerX;
-    player.y = canvas.height - 120;
 
-    if (Math.random() < 0.6) {
+    if (Math.random() < (offRoad ? 0.9 : 0.6)) {
         particles.push({
             x: player.x + (Math.random() - 0.5) * 6,
             y: player.y + 20,
             vx: (Math.random() - 0.5) * 1.5,
             vy: 2 + Math.random() * 2,
             size: 2 + Math.random() * 4,
-            alpha: 0.6
+            alpha: 0.6,
+            grass: offRoad
         });
     }
-
     for (let i = particles.length - 1; i >= 0; i--) {
-        let p = particles[i];
+        const p = particles[i];
         p.x += p.vx;
         p.y += p.vy;
         p.alpha -= 0.02;
         if (p.alpha <= 0) particles.splice(i, 1);
     }
 
-    for (let i = obstacles.length - 1; i >= 0; i--) {
-        let obs = obstacles[i];
-        obs.y += speed * 0.4;
-
-        const dx = player.x - obs.x;
-        const dy = player.y - obs.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-
-        if (dist < obs.radius + player.width / 2) {
-            gameOver();
-        }
-
-        if (obs.y > canvas.height + 50) obstacles.splice(i, 1);
-    }
-
     let currentSponsorText = null;
-    for (let i = banners.length - 1; i >= 0; i--) {
-        let b = banners[i];
-        b.y += speed * 0.4;
-
-        if (Math.abs(b.y - player.y) < 150) {
-            currentSponsorText = b.sponsor.text;
+    for (const chunk of visibleChunks()) {
+        for (const o of chunk.obstacles) {
+            if (o.hit) continue;
+            const pos = obstacleScreen(o);
+            const dx = player.x - pos.x;
+            const dy = player.y - pos.y;
+            if (Math.sqrt(dx * dx + dy * dy) < o.radius + player.width / 2 - 2) {
+                if (o.type === 'puddle') {
+                    o.hit = true;
+                    speed = Math.max(9, speed * 0.85);  // pozzanghera: rallenta ma non fa cadere
+                } else {
+                    gameOver();
+                    return;
+                }
+            }
         }
-
-        if (b.y > canvas.height + 100) banners.splice(i, 1);
+        for (const b of chunk.banners) {
+            if (Math.abs(worldToScreenY(b.s) - player.y) < 150) currentSponsorText = b.sponsor.text;
+        }
     }
 
     const sponsorHud = document.getElementById('active-sponsor');
@@ -700,85 +772,144 @@ function update() {
 
     document.getElementById('dist-val').innerText = (distance / 1000).toFixed(2) + ' km';
     document.getElementById('speed-val').innerText = Math.round(speed) + ' km/h';
-
-    spawnWorldElements();
 }
 
 function draw() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
 
+    ctx.save();
+    if (shake > 0 && gameState === 'PLAYING') {
+        ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+    }
+
+    // erba
     ctx.fillStyle = '#3a4a28';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(-10, -10, W + 20, H + 20);
 
-    const roadWidth = canvas.width * 0.65;
-    const roadLeft = (canvas.width - roadWidth) / 2;
+    // strisce di mondo (4px) allineate al percorso: sfondo erba, bordo, ghiaia
+    const STEP = 4;
+    const kStart = Math.floor((scroll - 120) / STEP);
+    const kEnd = Math.ceil((scroll + H + 20) / STEP);
+    for (let k = kStart; k <= kEnd; k++) {
+        const sw = k * STEP;
+        const y = worldToScreenY(sw) - STEP;
+        if (y > H || y < -STEP * 2) continue;
+        const cx = roadCenter(sw);
+        const hw = roadHalfWidth(sw);
 
-    ctx.fillStyle = '#8c7355';
-    ctx.fillRect(roadLeft, 0, roadWidth, canvas.height);
+        // erba a bande leggere
+        ctx.fillStyle = (Math.floor(k / 14) % 2) ? '#3a4a28' : '#40522c';
+        ctx.fillRect(0, y, W, STEP + 1);
 
-    ctx.strokeStyle = '#6e5a42';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.moveTo(roadLeft, 0);
-    ctx.lineTo(roadLeft, canvas.height);
-    ctx.moveTo(roadLeft + roadWidth, 0);
-    ctx.lineTo(roadLeft + roadWidth, canvas.height);
-    ctx.stroke();
+        // bordo sterrato
+        ctx.fillStyle = '#6e5a42';
+        ctx.fillRect(cx - hw - 5, y, hw * 2 + 10, STEP + 1);
 
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([20, 20]);
-    ctx.lineDashOffset = -roadOffset;
-    ctx.beginPath();
-    ctx.moveTo(canvas.width / 2, 0);
-    ctx.lineTo(canvas.width / 2, canvas.height);
-    ctx.stroke();
-    ctx.setLineDash([]);
+        // fondo strada con leggera variazione per striscia
+        const shade = 140 + Math.floor(hash1(k) * 14) - 7;
+        ctx.fillStyle = `rgb(${shade}, ${shade - 25}, ${shade - 55})`;
+        ctx.fillRect(cx - hw, y, hw * 2, STEP + 1);
 
-    banners.forEach(b => {
+        // solchi lasciati dalle ruote
+        ctx.fillStyle = 'rgba(70, 52, 34, 0.35)';
+        ctx.fillRect(cx - hw * 0.45 - 4, y, 8, STEP + 1);
+        ctx.fillRect(cx + hw * 0.45 - 4, y, 8, STEP + 1);
+
+        // sassolini
+        if (hash1(k * 3.7) > 0.55) {
+            ctx.fillStyle = hash1(k * 5.1) > 0.5 ? 'rgba(200,185,160,0.55)' : 'rgba(80,65,48,0.55)';
+            const px = cx - hw + hash1(k * 9.3) * hw * 2;
+            ctx.fillRect(px, y + 1, 2, 2);
+        }
+    }
+
+    // scenario ai lati (alberi e cespugli)
+    const chunks = visibleChunks();
+    chunks.forEach(chunk => chunk.scenery.forEach(sc => {
+        const y = worldToScreenY(sc.s);
+        if (y < -40 || y > H + 40) return;
+        const x = roadCenter(sc.s) + sc.side * (roadHalfWidth(sc.s) + 14 + sc.dist);
+        if (x < -30 || x > W + 30) return;
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.beginPath();
+        ctx.ellipse(x + 3, y + 3, sc.size, sc.size * 0.8, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = sc.kind === 'tree' ? '#27431f' : '#4b6b2c';
+        ctx.beginPath();
+        ctx.arc(x, y, sc.size, 0, Math.PI * 2);
+        ctx.fill();
+        if (sc.kind === 'tree') {
+            ctx.fillStyle = '#34592a';
+            ctx.beginPath();
+            ctx.arc(x - sc.size * 0.25, y - sc.size * 0.25, sc.size * 0.55, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }));
+
+    // cartelloni sponsor
+    chunks.forEach(chunk => chunk.banners.forEach(bn => {
+        const y = worldToScreenY(bn.s);
+        if (y < -80 || y > H + 80) return;
+        const x = roadCenter(bn.s) + bn.side * (roadHalfWidth(bn.s) + 22) - 15;
         ctx.fillStyle = '#475569';
-        ctx.fillRect(b.x, b.y, b.width, b.height);
-
-        ctx.fillStyle = b.sponsor.color;
-        ctx.fillRect(b.x - 2, b.y + 5, b.width + 4, b.height - 10);
-
+        ctx.fillRect(x, y - 30, 30, 60);
+        ctx.fillStyle = bn.sponsor.color;
+        ctx.fillRect(x - 2, y - 25, 34, 50);
         ctx.save();
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 9px sans-serif';
-        ctx.translate(b.x + b.width / 2, b.y + b.height / 2);
+        ctx.translate(x + 15, y);
         ctx.rotate(-Math.PI / 2);
         ctx.textAlign = 'center';
-        ctx.fillText(b.sponsor.name, 0, 3);
+        ctx.fillText(bn.sponsor.name, 0, 3);
         ctx.restore();
-    });
+    }));
 
+    // scia
     particles.forEach(p => {
-        ctx.fillStyle = `rgba(210, 180, 140, ${p.alpha})`;
+        ctx.fillStyle = p.grass ? `rgba(90, 120, 60, ${p.alpha})` : `rgba(210, 180, 140, ${p.alpha})`;
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
         ctx.fill();
     });
 
-    obstacles.forEach(obs => {
-        if (obs.type === 'hole') {
+    // ostacoli
+    chunks.forEach(chunk => chunk.obstacles.forEach(o => {
+        const pos = obstacleScreen(o);
+        if (pos.y < -40 || pos.y > H + 40) return;
+        if (o.type === 'hole') {
             ctx.fillStyle = '#2a1a08';
             ctx.beginPath();
-            ctx.ellipse(obs.x, obs.y, obs.radius, obs.radius * 0.6, 0, 0, Math.PI * 2);
+            ctx.ellipse(pos.x, pos.y, o.radius, o.radius * 0.6, 0, 0, Math.PI * 2);
             ctx.fill();
             ctx.strokeStyle = '#523a1c';
             ctx.lineWidth = 2;
             ctx.stroke();
+        } else if (o.type === 'puddle') {
+            ctx.fillStyle = 'rgba(80, 130, 170, 0.75)';
+            ctx.beginPath();
+            ctx.ellipse(pos.x, pos.y, o.radius * 1.2, o.radius * 0.7, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(200, 230, 255, 0.5)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
         } else {
             ctx.fillStyle = '#64748b';
             ctx.beginPath();
-            ctx.arc(obs.x, obs.y, obs.radius * 0.7, 0, Math.PI * 2);
+            ctx.arc(pos.x, pos.y, o.radius * 0.7, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = 'rgba(255,255,255,0.18)';
+            ctx.beginPath();
+            ctx.arc(pos.x - 3, pos.y - 3, o.radius * 0.3, 0, Math.PI * 2);
             ctx.fill();
         }
-    });
+    }));
 
     if (gameState === 'PLAYING' || gameState === 'GAMEOVER') {
         ctx.save();
         ctx.translate(player.x, player.y);
+        ctx.rotate(Math.max(-0.35, Math.min(0.35, (targetPlayerX - playerX) * 0.02)));
 
         ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
         ctx.beginPath();
@@ -820,6 +951,8 @@ function draw() {
 
         ctx.restore();
     }
+
+    ctx.restore();
 }
 
 function gameLoop() {
