@@ -11,6 +11,8 @@ module.exports = async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
         const col = (await getDb()).collection('scores');
+        // Migrazione: l'indice univoco per nome risale a prima degli account
+        await col.dropIndex('date_1_name_1').catch(() => {});
         await col.createIndex({ date: 1, userId: 1 }, { unique: true, partialFilterExpression: { userId: { $type: 'string' } } });
         await col.createIndex({ date: 1, dist: -1 });
         const date = todayKey();
@@ -35,7 +37,7 @@ module.exports = async (req, res) => {
         }
 
         const scores = await col
-            .find({ date }, { projection: { _id: 0, name: 1, dist: 1 } })
+            .find({ date, userId: { $exists: true } }, { projection: { _id: 0, name: 1, dist: 1 } })
             .sort({ dist: -1 })
             .limit(10)
             .toArray();
