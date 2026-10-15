@@ -148,6 +148,30 @@
             text-transform: uppercase;
             margin-bottom: 16px;
         }
+        .btn-small {
+            background: #38bdf8;
+            color: #0f172a;
+            border: none;
+            padding: 8px 16px;
+            font-size: 12px;
+            font-weight: 800;
+            border-radius: 20px;
+            cursor: pointer;
+            text-transform: uppercase;
+        }
+        .btn-small.secondary {
+            background: transparent;
+            color: #94a3b8;
+            border: 1px solid #475569;
+        }
+        .auth-msg {
+            margin-top: 8px;
+            font-size: 11px;
+            color: #94a3b8;
+            min-height: 14px;
+        }
+        .auth-msg.error { color: #f87171; }
+        .auth-user { font-size: 14px; margin-bottom: 8px; }
         .btn:active {
             transform: scale(0.96);
         }
@@ -289,9 +313,19 @@
         <h1 id="overlay-title">Daily Gravel</h1>
         <p class="sub-title" id="overlay-subtitle">Schiva le buche e conquista la classifica di oggi.</p>
 
-        <div class="player-input-group">
-            <label for="nickname">Nome Ciclista</label>
-            <input type="text" id="nickname" maxlength="12" placeholder="Es. GravelKing" value="Rider_1">
+        <div class="player-input-group" id="auth-logged-out">
+            <input type="text" id="auth-username" maxlength="12" placeholder="Nome ciclista" autocomplete="username" style="display:none; margin-bottom:6px;">
+            <input type="email" id="auth-email" placeholder="Email" autocomplete="email" style="margin-bottom:6px;">
+            <input type="password" id="auth-password" placeholder="Password (min. 8 caratteri)" autocomplete="current-password" style="margin-bottom:8px;">
+            <div style="display:flex; gap:8px; justify-content:center;">
+                <button class="btn-small" id="auth-submit">Accedi</button>
+                <button class="btn-small secondary" id="auth-toggle">Registrati</button>
+            </div>
+            <div class="auth-msg" id="auth-msg">Accedi per salvare i punteggi in classifica (puoi giocare anche senza).</div>
+        </div>
+        <div class="player-input-group" id="auth-logged-in" style="display:none;">
+            <div class="auth-user">Ciao, <strong id="auth-name"></strong></div>
+            <button class="btn-small secondary" id="auth-logout">Esci</button>
         </div>
 
         <button class="btn" id="start-btn">Sali in Sella</button>
@@ -413,9 +447,69 @@ async function updateLeaderboardUI(lastSubmittedPlayer = null) {
     });
 }
 
-// Carica nickname salvato precedentemente
-const savedNick = localStorage.getItem('gravel_player_nick');
-if (savedNick) document.getElementById('nickname').value = savedNick;
+// ==========================================
+// AUTH (email + password, sessione in cookie HttpOnly)
+// ==========================================
+let currentUser = null;
+let registerMode = false;
+
+async function authRequest(method, body) {
+    const res = await fetch('/api/auth', {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Errore di rete');
+    return data;
+}
+
+function setAuthMessage(text, isError) {
+    const el = document.getElementById('auth-msg');
+    el.textContent = text;
+    el.className = 'auth-msg' + (isError ? ' error' : '');
+}
+
+function renderAuth() {
+    document.getElementById('auth-logged-out').style.display = currentUser ? 'none' : 'block';
+    document.getElementById('auth-logged-in').style.display = currentUser ? 'block' : 'none';
+    if (currentUser) document.getElementById('auth-name').textContent = currentUser.username;
+    document.getElementById('auth-username').style.display = registerMode ? 'block' : 'none';
+    document.getElementById('auth-submit').textContent = registerMode ? 'Crea account' : 'Accedi';
+    document.getElementById('auth-toggle').textContent = registerMode ? 'Ho già un account' : 'Registrati';
+}
+
+document.getElementById('auth-toggle').addEventListener('click', () => {
+    registerMode = !registerMode;
+    setAuthMessage('', false);
+    renderAuth();
+});
+
+document.getElementById('auth-submit').addEventListener('click', async () => {
+    const body = {
+        action: registerMode ? 'register' : 'login',
+        email: document.getElementById('auth-email').value,
+        password: document.getElementById('auth-password').value,
+        username: document.getElementById('auth-username').value
+    };
+    try {
+        const data = await authRequest('POST', body);
+        currentUser = data.user;
+        document.getElementById('auth-password').value = '';
+        setAuthMessage('', false);
+        renderAuth();
+    } catch (e) {
+        setAuthMessage(e.message, true);
+    }
+});
+
+document.getElementById('auth-logout').addEventListener('click', async () => {
+    try { await authRequest('POST', { action: 'logout' }); } catch (e) {}
+    currentUser = null;
+    renderAuth();
+});
+
+authRequest('GET').then(d => { currentUser = d.user; renderAuth(); }).catch(() => renderAuth());
 
 updateLeaderboardUI();
 
@@ -465,9 +559,6 @@ touchRight.addEventListener('touchend', (e) => { e.preventDefault(); keys.right 
 document.getElementById('start-btn').addEventListener('click', startGame);
 
 function startGame() {
-    const nickInput = document.getElementById('nickname').value.trim() || "Rider_1";
-    localStorage.setItem('gravel_player_nick', nickInput);
-
     seed = getDailySeed();
     gameState = 'PLAYING';
     distance = 0;
@@ -483,18 +574,22 @@ function startGame() {
 async function gameOver() {
     gameState = 'GAMEOVER';
     const finalDistKm = distance / 1000;
-    const nickInput = document.getElementById('nickname').value.trim() || "Rider_1";
+    const nickInput = currentUser ? currentUser.username : null;
 
-    // Invio punteggio online
-    try {
-        await LeaderboardService.submitScore(nickInput, finalDistKm);
-    } catch (e) {
-        console.error(e);
+    // Invio punteggio online (solo utenti registrati)
+    let saved = false;
+    if (currentUser) {
+        try {
+            await LeaderboardService.submitScore(nickInput, finalDistKm);
+            saved = true;
+        } catch (e) {
+            console.error(e);
+        }
     }
 
     const overlay = document.getElementById('overlay');
     document.getElementById('overlay-title').innerText = 'Caduto!';
-    document.getElementById('overlay-subtitle').innerHTML = `Risultato: <strong>${finalDistKm.toFixed(2)} km</strong> registrati in classifica!`;
+    document.getElementById('overlay-subtitle').innerHTML = `Risultato: <strong>${finalDistKm.toFixed(2)} km</strong> ${saved ? 'registrati in classifica!' : (currentUser ? '(salvataggio non riuscito)' : '— accedi per entrare in classifica')}`;
     document.getElementById('start-btn').innerText = 'Riprova Tappa';
 
     updateLeaderboardUI(nickInput);

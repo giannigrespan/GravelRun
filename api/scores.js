@@ -1,12 +1,4 @@
-const { MongoClient } = require('mongodb');
-
-let clientPromise;
-function getCollection() {
-    if (!clientPromise) {
-        clientPromise = new MongoClient(process.env.MONGODB_URI).connect();
-    }
-    return clientPromise.then(c => c.db('gravelrun').collection('scores'));
-}
+const { getDb, getSession } = require('./_lib');
 
 // Giorno della tappa calcolato sul server (fuso italiano) così tutti giocano la stessa tappa
 function todayKey() {
@@ -18,23 +10,24 @@ const MAX_KM = 100;
 module.exports = async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     try {
-        const col = await getCollection();
-        await col.createIndex({ date: 1, name: 1 }, { unique: true });
+        const col = (await getDb()).collection('scores');
+        await col.createIndex({ date: 1, userId: 1 }, { unique: true, partialFilterExpression: { userId: { $type: 'string' } } });
         await col.createIndex({ date: 1, dist: -1 });
         const date = todayKey();
 
         if (req.method === 'POST') {
+            const session = getSession(req);
+            if (!session) return res.status(401).json({ error: 'Accedi per registrare il punteggio' });
+
             const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
-            const name = String(body.name || '').trim().replace(/[<>&"']/g, '').slice(0, 12) || 'Rider_1';
             const dist = Number(body.dist);
             if (!Number.isFinite(dist) || dist <= 0 || dist > MAX_KM) {
                 return res.status(400).json({ error: 'Distanza non valida' });
             }
-            const rounded = Math.round(dist * 100) / 100;
-            // Un solo record per nome al giorno: si tiene il migliore
+            // Un solo record per utente al giorno: si tiene il migliore
             await col.updateOne(
-                { date, name },
-                { $max: { dist: rounded }, $setOnInsert: { createdAt: new Date() } },
+                { date, userId: session.uid },
+                { $max: { dist: Math.round(dist * 100) / 100 }, $set: { name: session.username }, $setOnInsert: { createdAt: new Date() } },
                 { upsert: true }
             );
         } else if (req.method !== 'GET') {
