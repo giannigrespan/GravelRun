@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 
 let clientPromise;
 function getDb() {
@@ -65,4 +65,4 @@ function checkPassword(password, salt, hash) {
     return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-module.exports = { getDb, getSession, setSession, clearSession, hashPassword, checkPassword };
+module.exports = { ObjectId, getDb, getSession, setSession, clearSession, hashPassword, checkPassword };

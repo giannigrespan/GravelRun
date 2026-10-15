@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Daily Gravel Adventure - Leaderboard</title>
+    <title>Gravel Run</title>
     <style>
         * {
             box-sizing: border-box;
@@ -172,6 +172,26 @@
         }
         .auth-msg.error { color: #f87171; }
         .auth-user { font-size: 14px; margin-bottom: 8px; }
+        .level-grid {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 6px;
+            width: 100%;
+            max-width: 280px;
+            margin-bottom: 14px;
+        }
+        .lvl-btn {
+            background: #1e293b;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 8px;
+            padding: 8px 0;
+            font-size: 14px;
+            font-weight: 800;
+            cursor: pointer;
+        }
+        .lvl-btn.selected { background: #38bdf8; color: #0f172a; border-color: #38bdf8; }
+        .lvl-btn.locked { opacity: 0.35; cursor: not-allowed; }
         .btn:active {
             transform: scale(0.96);
         }
@@ -287,8 +307,8 @@
 <div id="game-container">
     <div class="ui-panel">
         <div class="hud-box">
-            <div class="hud-label">Distanza</div>
-            <div class="hud-value" id="dist-val">0.0 km</div>
+            <div class="hud-label">Progresso</div>
+            <div class="hud-value" id="dist-val">0%</div>
         </div>
         <div class="hud-box">
             <div class="hud-label">Velocità</div>
@@ -309,9 +329,9 @@
     </div>
 
     <div id="overlay">
-        <div class="date-badge" id="daily-date">Tappa del Giorno</div>
-        <h1 id="overlay-title">Daily Gravel</h1>
-        <p class="sub-title" id="overlay-subtitle">Schiva le buche e conquista la classifica di oggi.</p>
+        <div class="date-badge" id="daily-date">Livello 1</div>
+        <h1 id="overlay-title">Gravel Run</h1>
+        <p class="sub-title" id="overlay-subtitle">Arriva al traguardo nel minor tempo possibile.</p>
 
         <div class="player-input-group" id="auth-logged-out">
             <input type="text" id="auth-username" maxlength="12" placeholder="Nome ciclista" autocomplete="username" style="display:none; margin-bottom:6px;">
@@ -328,11 +348,13 @@
             <button class="btn-small secondary" id="auth-logout">Esci</button>
         </div>
 
+        <div class="level-grid" id="level-grid"></div>
+
         <button class="btn" id="start-btn">Sali in Sella</button>
 
         <div class="leaderboard-box">
             <div class="leaderboard-title">
-                <span>Classifica di Oggi</span>
+                <span id="lb-title">Classifica Livello 1</span>
                 <span id="lb-status" style="font-size:10px; color:#64748b;">Connessione...</span>
             </div>
             <ul class="leaderboard-list" id="leaderboard-list">
@@ -346,6 +368,7 @@
     </div>
 </div>
 
+<script src="levels.js"></script>
 <script>
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -358,39 +381,48 @@ function resize() {
 resize();
 window.addEventListener('resize', resize);
 
-// Seed e Data giornaliera
-function getDailySeed() {
-    const d = new Date();
-    return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+// Livelli (dati condivisi con il server in levels.js)
+let selectedLevel = 1;
+let currentLevel = LEVELS[0];
+let ticks = 0;   // tick di gioco a 60Hz: il tempo è indipendente dal refresh dello schermo
+
+function fmtTime(ms) {
+    const m = Math.floor(ms / 60000);
+    const sec = ((ms % 60000) / 1000).toFixed(2).padStart(5, '0');
+    return `${m}:${sec}`;
 }
 
-function getDailyDateKey() {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+function getLocalUnlocked() {
+    try { return Math.min(LEVELS.length, Math.max(1, Number(localStorage.getItem('gravel_unlocked')) || 1)); }
+    catch (e) { return 1; }
 }
 
-const today = new Date();
-document.getElementById('daily-date').innerText = `Tappa del ${today.getDate()}/${today.getMonth()+1}/${today.getFullYear()}`;
+function setLocalUnlocked(n) {
+    try { localStorage.setItem('gravel_unlocked', String(Math.max(getLocalUnlocked(), n))); } catch (e) {}
+}
+
+function getUnlocked() {
+    return currentUser ? (currentUser.unlocked || 1) : getLocalUnlocked();
+}
 
 // ==========================================
 // ONLINE LEADERBOARD SERVICE (API Vercel + MongoDB, fallback locale)
 // ==========================================
 const LeaderboardService = {
-    async getDailyScores() {
-        const res = await fetch('/api/scores');
+    async getScores(level) {
+        const res = await fetch('/api/scores?level=' + level);
         if (!res.ok) throw new Error('API ' + res.status);
         return (await res.json()).scores;
     },
 
-    async submitScore(playerName, distanceKm) {
-        if (!playerName || distanceKm <= 0) return;
+    async submitTime(level, time) {
         const res = await fetch('/api/scores', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: playerName, dist: distanceKm })
+            body: JSON.stringify({ level, time })
         });
         if (!res.ok) throw new Error('API ' + res.status);
-        return (await res.json()).scores;
+        return res.json();
     }
 };
 
@@ -400,26 +432,29 @@ function setLeaderboardStatus(text, ok) {
     el.style.color = ok ? '#22c55e' : '#f59e0b';
 }
 
-async function updateLeaderboardUI(lastSubmittedPlayer = null) {
+async function updateLeaderboardUI(highlightName = null) {
+    const level = selectedLevel;
     const listEl = document.getElementById('leaderboard-list');
+    document.getElementById('lb-title').textContent = `Classifica Livello ${level}`;
     let scores;
     try {
-        scores = await LeaderboardService.getDailyScores();
+        scores = await LeaderboardService.getScores(level);
         setLeaderboardStatus('Online', true);
     } catch (e) {
         setLeaderboardStatus('Offline', false);
         listEl.innerHTML = '<li class="leaderboard-item">Classifica non disponibile</li>';
         return;
     }
+    if (level !== selectedLevel) return;   // nel frattempo è stato scelto un altro livello
 
     listEl.innerHTML = '';
     if (!scores.length) {
-        listEl.innerHTML = '<li class="leaderboard-item">Nessun tempo oggi: sii il primo!</li>';
+        listEl.innerHTML = '<li class="leaderboard-item">Nessun tempo: sii il primo!</li>';
         return;
     }
     scores.forEach((s, index) => {
         const li = document.createElement('li');
-        const isCurrent = lastSubmittedPlayer && s.name === lastSubmittedPlayer;
+        const isCurrent = highlightName && s.name === highlightName;
         li.className = `leaderboard-item ${isCurrent ? 'highlight' : ''}`;
 
         let rankClass = '';
@@ -435,10 +470,35 @@ async function updateLeaderboardUI(lastSubmittedPlayer = null) {
         name.textContent = s.name;
         const val = document.createElement('span');
         val.className = 'score-val';
-        val.textContent = `${s.dist.toFixed(2)} km`;
+        val.textContent = fmtTime(s.time);
         li.append(rank, name, val);
         listEl.appendChild(li);
     });
+}
+
+function selectLevel(n) {
+    selectedLevel = n;
+    currentLevel = LEVELS[n - 1];
+    document.getElementById('daily-date').textContent = `Livello ${n} · ${currentLevel.name}`;
+    renderLevels();
+    updateLeaderboardUI();
+}
+
+function renderLevels() {
+    const grid = document.getElementById('level-grid');
+    const unlocked = getUnlocked();
+    if (selectedLevel > unlocked) { selectedLevel = unlocked; currentLevel = LEVELS[unlocked - 1]; }
+    grid.innerHTML = '';
+    LEVELS.forEach((_, i) => {
+        const n = i + 1;
+        const btn = document.createElement('button');
+        btn.className = 'lvl-btn' + (n === selectedLevel ? ' selected' : '') + (n > unlocked ? ' locked' : '');
+        btn.textContent = n > unlocked ? '🔒' : n;
+        btn.disabled = n > unlocked;
+        btn.addEventListener('click', () => selectLevel(n));
+        grid.appendChild(btn);
+    });
+    document.getElementById('daily-date').textContent = `Livello ${selectedLevel} · ${currentLevel.name}`;
 }
 
 // ==========================================
@@ -471,6 +531,8 @@ function renderAuth() {
     document.getElementById('auth-username').style.display = registerMode ? 'block' : 'none';
     document.getElementById('auth-submit').textContent = registerMode ? 'Crea account' : 'Accedi';
     document.getElementById('auth-toggle').textContent = registerMode ? 'Ho già un account' : 'Registrati';
+    renderLevels();
+    updateLeaderboardUI();
 }
 
 document.getElementById('auth-toggle').addEventListener('click', () => {
@@ -505,21 +567,17 @@ document.getElementById('auth-logout').addEventListener('click', async () => {
 
 authRequest('GET').then(d => { currentUser = d.user; renderAuth(); }).catch(() => renderAuth());
 
-updateLeaderboardUI();
-
 // Sponsor
 const SPONSORS = [
-    { name: "SHIMANO", color: "#0066B2", text: "Settore Shimano - Cambio di Pace!" },
-    { name: "CANYON", color: "#1A1A1A", text: "Tratto Speed Canyon Bikes" },
-    { name: "Vittoria", color: "#E30613", text: "Zona Grip Vittoria Terreno Dry" },
-    { name: "MAAP", color: "#FF6B00", text: "Style Zone MAAP Apparel" }
+    { name: "SHIMANO", color: "#0066B2", accent: "#7dd3fc", tag: "Cambio di Pace!", text: "Settore Shimano - Cambio di Pace!" },
+    { name: "CANYON", color: "#1A1A1A", accent: "#f43f5e", tag: "Bikes Speed Zone", text: "Tratto Speed Canyon Bikes" },
+    { name: "Vittoria", color: "#E30613", accent: "#fde68a", tag: "Grip Totale", text: "Zona Grip Vittoria Terreno Dry" },
+    { name: "MAAP", color: "#FF6B00", accent: "#fff7ed", tag: "Style Zone", text: "Style Zone MAAP Apparel" }
 ];
 
 // Stato Gioco
 let gameState = 'START';
-let distance = 0;
 let speed = 0;
-const MAX_SPEED = 32;
 let playerX = 0;
 let targetPlayerX = 0;
 let roadOffset = 0;
@@ -551,10 +609,11 @@ touchRight.addEventListener('touchend', (e) => { e.preventDefault(); keys.right 
 document.getElementById('start-btn').addEventListener('click', startGame);
 
 function startGame() {
+    currentLevel = LEVELS[selectedLevel - 1];
     initWorld();
     gameState = 'PLAYING';
-    distance = 0;
-    speed = 18;
+    ticks = 0;
+    speed = currentLevel.speed0;
     player.y = canvas.height - 120;
     playerX = canvas.width / 2;
     targetPlayerX = playerX;
@@ -562,34 +621,56 @@ function startGame() {
     document.getElementById('overlay').style.display = 'none';
 }
 
-async function gameOver() {
-    gameState = 'GAMEOVER';
-    const finalDistKm = distance / 1000;
-    const nickInput = currentUser ? currentUser.username : null;
-
-    // Invio punteggio online (solo utenti registrati)
-    let saved = false;
-    if (currentUser) {
-        try {
-            await LeaderboardService.submitScore(nickInput, finalDistKm);
-            saved = true;
-        } catch (e) {
-            console.error(e);
-        }
-    }
-
-    const overlay = document.getElementById('overlay');
-    document.getElementById('overlay-title').innerText = 'Caduto!';
-    document.getElementById('overlay-subtitle').innerHTML = `Risultato: <strong>${finalDistKm.toFixed(2)} km</strong> ${saved ? 'registrati in classifica!' : (currentUser ? '(salvataggio non riuscito)' : '— accedi per entrare in classifica')}`;
-    document.getElementById('start-btn').innerText = 'Riprova Tappa';
-
-    updateLeaderboardUI(nickInput);
-    overlay.style.display = 'flex';
+function showOverlay(title, subtitleHtml, buttonText) {
+    document.getElementById('overlay-title').innerText = title;
+    document.getElementById('overlay-subtitle').innerHTML = subtitleHtml;
+    document.getElementById('start-btn').innerText = buttonText;
+    document.getElementById('overlay').style.display = 'flex';
     document.getElementById('active-sponsor').style.display = 'none';
 }
 
+function gameOver() {
+    if (gameState !== 'PLAYING') return;
+    gameState = 'GAMEOVER';
+    const pct = Math.min(99, Math.floor(scroll / currentLevel.goal * 100));
+    showOverlay('Caduto!', `Sei arrivato al <strong>${pct}%</strong> del livello ${selectedLevel}.`, 'Riprova livello');
+    updateLeaderboardUI();
+}
+
+async function finishLevel() {
+    if (gameState !== 'PLAYING') return;
+    gameState = 'FINISHED';
+    const level = selectedLevel;
+    const timeMs = Math.round(ticks * 1000 / 60);
+
+    let saveNote;
+    if (currentUser) {
+        try {
+            const data = await LeaderboardService.submitTime(level, timeMs);
+            currentUser.unlocked = Math.max(currentUser.unlocked || 1, data.unlocked || level);
+            saveNote = 'tempo registrato in classifica!';
+        } catch (e) {
+            console.error(e);
+            saveNote = '(salvataggio non riuscito)';
+        }
+    } else {
+        saveNote = '— accedi per entrare in classifica';
+    }
+    setLocalUnlocked(level + 1);
+
+    const hasNext = level < LEVELS.length;
+    if (hasNext) {
+        selectedLevel = level + 1;
+        currentLevel = LEVELS[selectedLevel - 1];
+    }
+    renderLevels();
+    showOverlay('Traguardo!', `Livello ${level} in <strong>${fmtTime(timeMs)}</strong> ${saveNote}`,
+        hasNext ? `Livello ${selectedLevel}` : 'Rigioca');
+    updateLeaderboardUI(currentUser ? currentUser.username : null);
+}
+
 // ==========================================
-// MONDO: percorso sinuoso deterministico (stesso per tutti nella tappa del giorno)
+// MONDO: percorso sinuoso deterministico per livello
 // ==========================================
 const CHUNK = 400;          // lunghezza di un blocco di mondo (px)
 let scroll = 0;             // posizione lungo il percorso
@@ -612,8 +693,7 @@ function hash1(n) {
 }
 
 function initWorld() {
-    const ds = getDailySeed();
-    const r = mulberry32(ds);
+    const r = mulberry32(currentLevel.seed);
     roadPhase = [r() * Math.PI * 2, r() * Math.PI * 2, r() * Math.PI * 2];
     worldChunks = new Map();
     scroll = 0;
@@ -624,40 +704,62 @@ function initWorld() {
 function curveRamp(sw) { return Math.min(1, Math.max(0, sw - 600) / 3000); }
 
 function roadCenter(sw) {
-    const amp = canvas.width * 0.2 * curveRamp(sw);
+    const amp = canvas.width * currentLevel.amp * curveRamp(sw);
+    const f = currentLevel.freq;
     return canvas.width / 2
-        + amp * (0.65 * Math.sin(sw / 520 + roadPhase[0]) + 0.35 * Math.sin(sw / 230 + roadPhase[1]));
+        + amp * (0.65 * Math.sin(sw * f / 520 + roadPhase[0]) + 0.35 * Math.sin(sw * f / 230 + roadPhase[1]));
 }
 
 function roadHalfWidth(sw) {
-    // La strada si restringe leggermente e varia con il percorso
-    const narrow = 1 - 0.25 * Math.min(1, sw / 60000);
-    return canvas.width * 0.27 * narrow * (1 + 0.08 * Math.sin(sw / 900 + roadPhase[2]));
+    // La larghezza dipende dal livello e varia leggermente lungo il percorso
+    return canvas.width * currentLevel.halfW * (1 + 0.08 * Math.sin(sw / 900 + roadPhase[2]));
 }
 
 function getChunk(i) {
     if (worldChunks.has(i)) return worldChunks.get(i);
-    const r = mulberry32(getDailySeed() * 1009 + i * 7919);
-    const chunk = { obstacles: [], banners: [], scenery: [] };
+    const r = mulberry32(currentLevel.seed * 1009 + i * 7919);
+    const chunk = { obstacles: [], banners: [], paints: [], scenery: [] };
     const start = i * CHUNK;
-    const difficulty = Math.min(1, i / 60);
+    const lvl = currentLevel;
 
-    const nObs = Math.floor(1 + r() * 2 + difficulty * 3);
-    for (let k = 0; k < nObs; k++) {
-        const roll = r();
+    // Ostacoli su "slot" a distanza regolare (gap): la posizione laterale varia in modo graduale,
+    // così lo spostamento tra due ostacoli consecutivi è sempre raggiungibile.
+    // Ogni slot ha un proprio generatore: il risultato non dipende dal blocco in cui cade.
+    const phi = Math.min(0.8, 0.5 * lvl.gap / 250);
+    const j0 = Math.max(0, Math.floor((start - 500) / lvl.gap) - 1);
+    const j1 = Math.ceil((start + CHUNK - 500) / lvl.gap) + 1;
+    for (let j = j0; j <= j1; j++) {
+        const q = mulberry32(lvl.seed * 7 + j * 131);
+        const pos = 500 + j * lvl.gap + (q() * 2 - 1) * 0.15 * lvl.gap;
+        const present = q() < 0.85;
+        const jitter = (q() * 2 - 1) * 0.1;
+        const roll = q();
+        const radius = 11 + q() * 10;
+        const isHole = q() < 0.65;
+        if (!present || pos < start || pos >= start + CHUNK || pos > lvl.goal - 200) continue;
         chunk.obstacles.push({
-            s: start + 120 + r() * (CHUNK - 120),
-            off: (r() * 2 - 1) * 0.85,
-            radius: 11 + r() * 10,
-            type: roll < 0.5 ? 'hole' : roll < 0.75 ? 'rock' : 'puddle'
+            s: pos,
+            off: Math.max(-0.85, Math.min(0.85, 0.75 * Math.sin(j * phi + roadPhase[1]) + jitter)),
+            radius,
+            type: roll < lvl.puddle ? 'puddle' : (isHole ? 'hole' : 'rock')
         });
     }
-    if (r() < 0.22 && i > 2) {
+    // Cartelloni sponsor: grandi, dal lato della strada con più spazio (uno garantito nel primo tratto)
+    if (i >= 1 && (i === 1 || r() < 0.55)) {
+        const pos = start + 60 + r() * (CHUNK - 120);
+        const cx = roadCenter(pos), hw = roadHalfWidth(pos);
+        const spaceL = cx - hw, spaceR = canvas.width - cx - hw;
+        const side = spaceR >= spaceL ? 1 : -1;
         chunk.banners.push({
-            s: start + r() * CHUNK,
-            side: r() < 0.5 ? -1 : 1,
-            sponsor: SPONSORS[Math.floor(r() * SPONSORS.length)]
+            s: pos,
+            side,
+            w: Math.max(70, Math.min(140, Math.max(spaceL, spaceR) - 22)),
+            sponsor: SPONSORS[(Math.floor(r() * SPONSORS.length) + i) % SPONSORS.length]
         });
+    }
+    // Loghi dipinti sulla strada
+    if (i >= 2 && r() < 0.3) {
+        chunk.paints.push({ s: start + 80 + r() * (CHUNK - 160), sponsor: SPONSORS[Math.floor(r() * SPONSORS.length)] });
     }
     for (let k = 0; k < 7; k++) {
         chunk.scenery.push({
@@ -698,6 +800,7 @@ function update() {
     if (gameState !== 'PLAYING') return;
 
     player.y = canvas.height - 120;
+    ticks++;
     const offRoad = isOffRoad();
 
     // fuori strada si rallenta e si trema; sulla strada si accelera
@@ -705,13 +808,16 @@ function update() {
         speed = Math.max(9, speed - 0.25);
         shake = 2.5;
     } else {
-        speed = Math.min(MAX_SPEED, speed + 0.02);
+        speed = Math.min(currentLevel.speedMax, speed + 0.02);
         shake = Math.max(0, shake - 0.3);
     }
 
-    distance += speed * 0.1;
     scroll += speed * 0.4;
     roadOffset += speed * 0.8;
+    if (scroll >= currentLevel.goal) {
+        finishLevel();
+        return;
+    }
 
     const moveSpeed = 6;
     if (keys.left) targetPlayerX -= moveSpeed;
@@ -758,7 +864,7 @@ function update() {
             }
         }
         for (const b of chunk.banners) {
-            if (Math.abs(worldToScreenY(b.s) - player.y) < 150) currentSponsorText = b.sponsor.text;
+            if (Math.abs(worldToScreenY(b.s) - player.y) < 220) currentSponsorText = b.sponsor.text;
         }
     }
 
@@ -770,7 +876,7 @@ function update() {
         sponsorHud.style.display = 'none';
     }
 
-    document.getElementById('dist-val').innerText = (distance / 1000).toFixed(2) + ' km';
+    document.getElementById('dist-val').innerText = Math.floor(scroll / currentLevel.goal * 100) + '%';
     document.getElementById('speed-val').innerText = Math.round(speed) + ' km/h';
 }
 
@@ -784,7 +890,8 @@ function draw() {
     }
 
     // erba
-    ctx.fillStyle = '#3a4a28';
+    const th = currentLevel.theme;
+    ctx.fillStyle = th.grass[0];
     ctx.fillRect(-10, -10, W + 20, H + 20);
 
     // strisce di mondo (4px) allineate al percorso: sfondo erba, bordo, ghiaia
@@ -799,16 +906,17 @@ function draw() {
         const hw = roadHalfWidth(sw);
 
         // erba a bande leggere
-        ctx.fillStyle = (Math.floor(k / 14) % 2) ? '#3a4a28' : '#40522c';
+        ctx.fillStyle = (Math.floor(k / 14) % 2) ? th.grass[0] : th.grass[1];
         ctx.fillRect(0, y, W, STEP + 1);
 
         // bordo sterrato
-        ctx.fillStyle = '#6e5a42';
+        ctx.fillStyle = `rgb(${th.road[0] * 0.6 | 0}, ${th.road[1] * 0.6 | 0}, ${th.road[2] * 0.6 | 0})`;
         ctx.fillRect(cx - hw - 5, y, hw * 2 + 10, STEP + 1);
 
         // fondo strada con leggera variazione per striscia
         const shade = 140 + Math.floor(hash1(k) * 14) - 7;
-        ctx.fillStyle = `rgb(${shade}, ${shade - 25}, ${shade - 55})`;
+        const d = shade - 140;
+        ctx.fillStyle = `rgb(${th.road[0] + d}, ${th.road[1] + d}, ${th.road[2] + d})`;
         ctx.fillRect(cx - hw, y, hw * 2, STEP + 1);
 
         // solchi lasciati dalle ruote
@@ -821,6 +929,19 @@ function draw() {
             ctx.fillStyle = hash1(k * 5.1) > 0.5 ? 'rgba(200,185,160,0.55)' : 'rgba(80,65,48,0.55)';
             const px = cx - hw + hash1(k * 9.3) * hw * 2;
             ctx.fillRect(px, y + 1, 2, 2);
+        }
+    }
+
+    // traguardo a scacchi
+    const finY = worldToScreenY(currentLevel.goal);
+    if (finY > -30 && finY < H + 30) {
+        const fx = roadCenter(currentLevel.goal), fw = roadHalfWidth(currentLevel.goal);
+        const sq = 10, cols = Math.ceil(fw * 2 / sq);
+        for (let row = 0; row < 3; row++) {
+            for (let c = 0; c < cols; c++) {
+                ctx.fillStyle = (row + c) % 2 ? '#111827' : '#f8fafc';
+                ctx.fillRect(fx - fw + c * sq, finY - 15 + row * sq, Math.min(sq, fx + fw - (fx - fw + c * sq)), sq);
+            }
         }
     }
 
@@ -847,23 +968,59 @@ function draw() {
         }
     }));
 
+    // loghi sponsor dipinti sulla strada
+    chunks.forEach(chunk => chunk.paints.forEach(pt => {
+        const y = worldToScreenY(pt.s);
+        if (y < -40 || y > H + 40) return;
+        ctx.save();
+        ctx.translate(roadCenter(pt.s), y);
+        ctx.scale(1, 0.55);
+        ctx.font = '900 34px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+        ctx.strokeText(pt.sponsor.name.toUpperCase(), 0, 0);
+        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.fillText(pt.sponsor.name.toUpperCase(), 0, 0);
+        ctx.restore();
+    }));
+
     // cartelloni sponsor
     chunks.forEach(chunk => chunk.banners.forEach(bn => {
         const y = worldToScreenY(bn.s);
-        if (y < -80 || y > H + 80) return;
-        const x = roadCenter(bn.s) + bn.side * (roadHalfWidth(bn.s) + 22) - 15;
-        ctx.fillStyle = '#475569';
-        ctx.fillRect(x, y - 30, 30, 60);
-        ctx.fillStyle = bn.sponsor.color;
-        ctx.fillRect(x - 2, y - 25, 34, 50);
-        ctx.save();
+        if (y < -60 || y > H + 60) return;
+        const cx = roadCenter(bn.s), hw = roadHalfWidth(bn.s);
+        const w = bn.w, h = 88, sp = bn.sponsor;
+        const x = bn.side > 0 ? cx + hw + 14 : cx - hw - 14 - w;
+        const top = y - h / 2;
+
+        ctx.fillStyle = 'rgba(0,0,0,0.28)';
+        ctx.fillRect(x + 7, top + 9, w, h);
+        ctx.fillStyle = '#334155';
+        ctx.fillRect(x + w * 0.18, top + h, 6, 14);
+        ctx.fillRect(x + w * 0.82 - 6, top + h, 6, 14);
+
+        ctx.fillStyle = sp.color;
+        ctx.fillRect(x, top, w, h);
+        ctx.fillStyle = sp.accent;
+        ctx.fillRect(x, top, w, 6);
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x + 1.5, top + 1.5, w - 3, h - 3);
+
         ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 9px sans-serif';
-        ctx.translate(x + 15, y);
-        ctx.rotate(-Math.PI / 2);
         ctx.textAlign = 'center';
-        ctx.fillText(bn.sponsor.name, 0, 3);
-        ctx.restore();
+        ctx.textBaseline = 'middle';
+        const name = sp.name.toUpperCase();
+        ctx.font = '900 26px sans-serif';
+        const scale = Math.min(1, (w - 16) / ctx.measureText(name).width);
+        ctx.font = `900 ${Math.floor(26 * scale)}px sans-serif`;
+        ctx.fillText(name, x + w / 2, top + 38);
+        ctx.font = '700 12px sans-serif';
+        ctx.fillStyle = 'rgba(255,255,255,0.88)';
+        ctx.fillText(sp.tag, x + w / 2, top + 66, w - 12);
+        ctx.textBaseline = 'alphabetic';
     }));
 
     // scia
@@ -955,13 +1112,23 @@ function draw() {
     ctx.restore();
 }
 
-function gameLoop() {
-    update();
+// Timestep fisso a 60Hz: stessa velocità di gioco su schermi a 60, 120 o 144Hz
+const STEP_MS = 1000 / 60;
+let lastFrame = performance.now();
+let accumulator = 0;
+
+function gameLoop(now) {
+    accumulator += Math.min(100, now - lastFrame);
+    lastFrame = now;
+    while (accumulator >= STEP_MS) {
+        update();
+        accumulator -= STEP_MS;
+    }
     draw();
     requestAnimationFrame(gameLoop);
 }
 
-gameLoop();
+requestAnimationFrame(gameLoop);
 </script>
 </body>
 </html>

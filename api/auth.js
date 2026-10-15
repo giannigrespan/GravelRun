@@ -1,4 +1,4 @@
-const { getDb, getSession, setSession, clearSession, hashPassword, checkPassword } = require('./_lib');
+const { ObjectId, getDb, getSession, setSession, clearSession, hashPassword, checkPassword } = require('./_lib');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_RE = /^[A-Za-z0-9_]{3,12}$/;
@@ -9,7 +9,9 @@ module.exports = async (req, res) => {
     try {
         if (req.method === 'GET') {
             const s = getSession(req);
-            return res.status(200).json({ user: s ? { username: s.username } : null });
+            if (!s) return res.status(200).json({ user: null });
+            const u = await (await getDb()).collection('users').findOne({ _id: new ObjectId(s.uid) });
+            return res.status(200).json({ user: u ? { username: u.username, unlocked: u.unlocked || 1 } : null });
         }
         if (req.method !== 'POST') return res.status(405).json({ error: 'Metodo non consentito' });
 
@@ -44,7 +46,7 @@ module.exports = async (req, res) => {
             try {
                 const r = await users.insertOne({ email, username, salt, hash, createdAt: new Date() });
                 setSession(res, { _id: r.insertedId, username });
-                return res.status(201).json({ user: { username } });
+                return res.status(201).json({ user: { username, unlocked: 1 } });
             } catch (e) {
                 if (e.code === 11000) {
                     const field = e.message.includes('username') ? 'Nome ciclista' : 'Email';
@@ -60,7 +62,7 @@ module.exports = async (req, res) => {
             const ok = checkPassword(password, (user || DUMMY).salt, (user || DUMMY).hash);
             if (!user || !ok) return res.status(401).json({ error: 'Email o password errati' });
             setSession(res, user);
-            return res.status(200).json({ user: { username: user.username } });
+            return res.status(200).json({ user: { username: user.username, unlocked: user.unlocked || 1 } });
         }
 
         return res.status(400).json({ error: 'Azione non valida' });
